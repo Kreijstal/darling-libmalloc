@@ -98,15 +98,9 @@ small_inplace_checksum_ptr(rack_t *rack, inplace_linkage_s *linkage, void *ptr)
 static MALLOC_INLINE free_list_t
 small_inplace_unchecksum_ptr(rack_t *rack, inplace_linkage_s *linkage)
 {
-	if (!linkage || !rack)
-		return (free_list_t){ .p = NULL };
-
 	if (linkage->checksum != (uint8_t)free_list_gen_checksum((uintptr_t)linkage->ptr ^ rack->cookie ^ (uintptr_t)rack)) {
 		free_list_checksum_botch(rack, linkage, linkage->ptr);
-		// DARLING: Allow survival when MallocCorruptionAbort=0
-		if (rack->debug_flags & MALLOC_ABORT_ON_CORRUPTION)
-			__builtin_trap();
-		return (free_list_t){ .p = NULL };
+		__builtin_trap();
 	}
 
 	return (free_list_t){ .p = linkage->ptr };
@@ -133,9 +127,7 @@ small_inplace_unchecksum_ptr_task(task_t task, memory_reader_t reader,
 	if (mapped_linkage->checksum != (uint8_t)free_list_gen_checksum(
 			(uintptr_t)mapped_linkage->ptr ^ mapped_rack->cookie ^ (uintptr_t)rack)) {
 		free_list_checksum_botch(rack, linkage, mapped_linkage->ptr);
-		// DARLING: Allow survival when MallocCorruptionAbort=0
-		if (rack->debug_flags & MALLOC_ABORT_ON_CORRUPTION)
-			__builtin_trap();
+		__builtin_trap();
 	}
 
 	return (free_list_t){ .p = mapped_linkage->ptr };
@@ -638,10 +630,7 @@ small_free_list_find_by_ptr(rack_t *rack, magazine_t *small_mag_ptr, void *ptr, 
 	malloc_zone_error(rack->debug_flags, true,
 			"small_free_list_find_by_ptr: ptr is not free (ptr metadata !SMALL_IS_FREE), "
 			"ptr=%p msize=%d metadata=0x%x\n", ptr, msize, *SMALL_METADATA_FOR_PTR(ptr));
-	if (rack->debug_flags & MALLOC_ABORT_ON_CORRUPTION) {
-		__builtin_trap();
-	}
-	return (free_list_t){ .p = ptr };
+	__builtin_trap();
 }
 
 void
@@ -1365,12 +1354,8 @@ small_free_no_lock(rack_t *rack, magazine_t *small_mag_ptr, mag_index_t mag_inde
 			msize += previous_msize;
 			index -= previous_msize;
 		} else {
-			// In Darling emulation mode (MALLOC_ABORT_ON_CORRUPTION not set), do not abort and skip
-			// coalescing with the inconsistent preceding block to prevent corrupting metadata further.
-			if (rack->debug_flags & MALLOC_ABORT_ON_CORRUPTION) {
-				_os_set_crash_log_message("small free list metadata inconsistency (headers[previous] != previous size)");
-				__builtin_trap();
-			}
+			_os_set_crash_log_message("small free list metadata inconsistency (headers[previous] != previous size)");
+			__builtin_trap();
 		}
 	}
 

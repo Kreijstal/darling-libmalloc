@@ -191,12 +191,10 @@ SZONE_MAGAZINE_PTR_REINIT_LOCK(magazine_t *mag_ptr)
 static MALLOC_NOINLINE void
 free_list_checksum_botch(rack_t *rack, void *ptr, void *value)
 {
-	if (rack->debug_flags & MALLOC_ABORT_ON_CORRUPTION) {
-		malloc_zone_error(rack->debug_flags, true,
-				"Incorrect checksum for freed object %p: "
-				"probably modified after being freed.\n"
-				"Corrupt value: %p\n", ptr, value);
-	}
+	malloc_zone_error(rack->debug_flags, true,
+			"Incorrect checksum for freed object %p: "
+			"probably modified after being freed.\n"
+			"Corrupt value: %p\n", ptr, value);
 }
 
 static MALLOC_INLINE uintptr_t
@@ -255,9 +253,6 @@ free_list_checksum_ptr(rack_t *rack, void *ptr)
 static MALLOC_INLINE void *
 free_list_unchecksum_ptr(rack_t *rack, inplace_union *ptr)
 {
-	if (!ptr || !rack)
-		return NULL;
-
 	inplace_union p;
 	uintptr_t t = ptr->u;
 
@@ -266,10 +261,7 @@ free_list_unchecksum_ptr(rack_t *rack, inplace_union *ptr)
 
 	if ((t ^ free_list_gen_checksum(p.u ^ rack->cookie)) & (uintptr_t)0xF) {
 		free_list_checksum_botch(rack, ptr, (void *)ptr->u);
-		// DARLING: If MallocCorruptionAbort=0 is requested, do not trap; return NULL to allow survival of minor heap inconsistencies.
-		if (rack->debug_flags & MALLOC_ABORT_ON_CORRUPTION)
-			__builtin_trap();
-		return NULL;
+		__builtin_trap();
 	}
 	return p.p;
 }

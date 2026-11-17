@@ -1057,10 +1057,16 @@ set_flags_from_environment(void)
 	const char **p;
 	const char *c;
 
-	// DARLING: In an emulation environment, do not abort by default on minor heap
-	// inconsistencies so that ported games and third-party apps (e.g. Enigma) can run.
-	// Only abort if MallocCorruptionAbort=1 is explicitly requested.
-	malloc_debug_flags = 0;
+#if __LP64__
+	malloc_debug_flags = MALLOC_ABORT_ON_CORRUPTION; // Set always on 64-bit processes
+#else
+	int libSystemVersion = NSVersionOfLinkTimeLibrary("System");
+	if ((-1 != libSystemVersion) && ((libSystemVersion >> 16) < 126) /* Lion or greater */) {
+		malloc_debug_flags = 0;
+	} else {
+		malloc_debug_flags = MALLOC_ABORT_ON_CORRUPTION;
+	}
+#endif
 
 	/*
 	 * Given that all environment variables start with "Malloc" we optimize by scanning quickly
@@ -1131,12 +1137,16 @@ set_flags_from_environment(void)
 		malloc_tracing_enabled = true;
 	}
 
+#if __LP64__
+/* initialization above forces MALLOC_ABORT_ON_CORRUPTION of 64-bit processes */
+#else
 	flag = getenv("MallocCorruptionAbort");
-	if (!restricted && flag && (flag[0] == '1' || flag[0] == 'y' || flag[0] == 'Y')) {
-		malloc_debug_flags |= MALLOC_ABORT_ON_CORRUPTION;
-	} else if (!restricted && flag && (flag[0] == '0')) {
+	if (!restricted && flag && (flag[0] == '0')) { // Set from an environment variable in 32-bit processes
 		malloc_debug_flags &= ~MALLOC_ABORT_ON_CORRUPTION;
+	} else if (flag) {
+		malloc_debug_flags |= MALLOC_ABORT_ON_CORRUPTION;
 	}
+#endif
 	flag = getenv("MallocCheckHeapStart");
 	if (flag) {
 		malloc_check_start = (unsigned)strtoul(flag, NULL, 0);
@@ -1875,12 +1885,42 @@ malloc_get_zone_name(malloc_zone_t *zone)
 }
 
 
+void *
+malloc_zone_malloc_with_options(malloc_zone_t *zone, size_t align, size_t size,
+		malloc_zone_malloc_options_t opts)
+{
+	void *ptr;
+
+	if (zone == NULL) {
+		zone = malloc_default_zone();
+	}
+	if ((align & (align - 1)) != 0) {
+		return NULL;
+	}
+
+	// An alignment of zero behaves like the default one on macOS 27.
+	if (align <= MALLOC_ZONE_MALLOC_DEFAULT_ALIGN) {
+		if (opts & MALLOC_ZONE_MALLOC_OPTION_CLEAR) {
+			return malloc_zone_calloc(zone, 1, size);
+		}
+		return malloc_zone_malloc(zone, size);
+	}
+
+	if (size % align != 0) {
+		return NULL;
+	}
+	ptr = malloc_zone_memalign(zone, align, size);
+	if (ptr != NULL && (opts & MALLOC_ZONE_MALLOC_OPTION_CLEAR)) {
+		memset(ptr, 0, size);
+	}
+	return ptr;
+}
+
 /*********	Typed allocation entry points	************/
 
 // Compilers targeting newer SDKs pass a type descriptor to every allocation (malloc_type_*),
 // which Apple's allocator uses to segregate allocations. Darling ignores the type and uses the
 // regular allocation paths.
-typedef unsigned long long malloc_type_id_t;
 
 MALLOC_EXPORT void *
 malloc_type_malloc(size_t size, malloc_type_id_t type_id)
@@ -1960,6 +2000,30 @@ malloc_type_zone_memalign(malloc_zone_t *zone, size_t alignment, size_t size, ma
 	return malloc_zone_memalign(zone, alignment, size);
 }
 
+MALLOC_EXPORT void *
+malloc_type_zone_malloc_with_options(malloc_zone_t *zone, size_t alignment, size_t size,
+		malloc_type_id_t type_id, malloc_zone_malloc_options_t opts)
+{
+	return malloc_zone_malloc_with_options(zone, alignment, size, opts);
+}
+
+/*
+ * QUIRK: libsystem_malloc also exports malloc_type_zone_malloc_with_options_internal.
+ * It is declared in no SDK header; clients bind it by name. Its parameters
+ * are not documented. We give it those of malloc_type_zone_malloc_with_options
+ * and forward to it. Evidence: the symbol list of the macOS libsystem_malloc
+ * (nm metadata of the SDK .tbd), and black-box observation on macOS 26.7.3
+ * x86_64 that a call with the typed variant's argument list and results
+ * behaves as for the typed variant (tier 2, one call shape only).
+ * Test: malloc_type_internal.c (test_quirk_zone_malloc_with_options_internal)
+ */
+MALLOC_EXPORT void *
+malloc_type_zone_malloc_with_options_internal(malloc_zone_t *zone, size_t alignment, size_t size,
+		malloc_type_id_t type_id, malloc_zone_malloc_options_t opts)
+{
+	return malloc_type_zone_malloc_with_options(zone, alignment, size, type_id, opts);
+}
+
 /*********	Generic ANSI callouts	************/
 
 void *
@@ -1992,12 +2056,12 @@ free(void *ptr)
 
 	zone = find_registered_zone(ptr, &size);
 	if (!zone) {
-		if (malloc_debug_flags & (MALLOC_ABORT_ON_CORRUPTION | MALLOC_ABORT_ON_ERROR)) {
-			int flags = MALLOC_REPORT_CRASH | MALLOC_REPORT_NOLOG;
-			malloc_report(flags,
-					"*** error for object %p: pointer being freed was not allocated\n", ptr);
+		int flags = MALLOC_REPORT_DEBUG | MALLOC_REPORT_NOLOG;
+		if ((malloc_debug_flags & (MALLOC_ABORT_ON_CORRUPTION | MALLOC_ABORT_ON_ERROR))) {
+			flags = MALLOC_REPORT_CRASH | MALLOC_REPORT_NOLOG;
 		}
-		return;
+		malloc_report(flags,
+				"*** error for object %p: pointer being freed was not allocated\n", ptr);
 	} else if (zone->version >= 6 && zone->free_definite_size) {
 		malloc_zone_free_definite_size(zone, ptr, size);
 	} else {
